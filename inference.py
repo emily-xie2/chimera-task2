@@ -22,12 +22,12 @@ Happy programming!
 """
 
 from pathlib import Path
+import os
 import json
 from glob import glob
 import hashlib
 import math
 import pyvips
-import SimpleITK
 import numpy
 import torch
 
@@ -158,11 +158,13 @@ def run():
 
 def interf0_handler():
     # Load inputs we may want to log; actual prediction uses JSONs
-    try:
-        _ = load_image_file_as_thumbnail(location=INPUT_PATH / "images/tissue-mask", max_size=1024)
-        _ = load_image_file_as_thumbnail(location=INPUT_PATH / "images/bladder-cancer-tissue-biopsy-wsi", max_size=1024)
-    except Exception as e:
-        print(f"Image thumbnail load warning: {e}")
+    if _env_flag("CHIMERA_LOAD_WSI_THUMBNAILS", False):
+        try:
+            thumb_size = _env_int("CHIMERA_THUMBNAIL_SIZE", 512)
+            _ = load_image_file_as_thumbnail(location=INPUT_PATH / "images/tissue-mask", max_size=thumb_size)
+            _ = load_image_file_as_thumbnail(location=INPUT_PATH / "images/bladder-cancer-tissue-biopsy-wsi", max_size=thumb_size)
+        except Exception as e:
+            print(f"Image thumbnail load warning: {e}")
 
     rna_json = load_json_file(location=INPUT_PATH / "bulk-rna-seq-bladder-cancer.json")
     clinical_json = load_json_file(
@@ -242,19 +244,42 @@ def load_image_file_as_thumbnail(*, location, max_size=1024):
     if not input_files:
         raise FileNotFoundError(f"No compatible image files found in {location}")
     file_path = input_files[0]
-    print(f"Loading pathology image as thumbnail using PyVips: {file_path}")
-    image = pyvips.Image.new_from_file(file_path)
-    scale_factor = min(max_size / image.width, max_size / image.height)
-    if scale_factor < 1.0:
-        print(
-            f"Downsampling image by factor {scale_factor:.3f} (from {image.width}x{image.height} to {int(image.width*scale_factor)}x{int(image.height*scale_factor)})"
-        )
-        image = image.resize(scale_factor)
-    else:
-        print(
-            f"Image size {image.width}x{image.height} is within max_size={max_size}, no downsampling needed"
-        )
-    return image
+    print(f"Loading pathology image as thumbnail using PyVips (fast path): {file_path}")
+    try:
+        # Fast path: decode at thumbnail size using pyramid levels when available
+        thumb = pyvips.Image.thumbnail(file_path, max_size, height=max_size)
+        return thumb
+    except Exception as e:
+        print(f"PyVips thumbnail fast path failed ({e}), falling back to sequential read")
+        image = pyvips.Image.new_from_file(file_path, access="sequential")
+        scale_factor = min(max_size / image.width, max_size / image.height)
+        if scale_factor < 1.0:
+            print(
+                f"Downsampling image by factor {scale_factor:.3f} (from {image.width}x{image.height} to {int(image.width*scale_factor)}x{int(image.height*scale_factor)})"
+            )
+            image = image.resize(scale_factor)
+        else:
+            print(
+                f"Image size {image.width}x{image.height} is within max_size={max_size}, no downsampling needed"
+            )
+        return image
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
 
 
 def _show_torch_cuda_info():
