@@ -8,7 +8,4 @@ matplotlib>=3.5.0
 pandas>=1.3.0
 wandb>=0.15.0
 pyvips
-SimpleITK
-joblib>=1.2.0
-hashlib
-math
+SimpleITKjoblib>=1.2.0
