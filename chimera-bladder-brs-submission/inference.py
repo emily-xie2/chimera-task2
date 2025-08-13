@@ -36,27 +36,9 @@ RESOURCE_PATH = Path("resources")
 
 
 def run():
-    # Resolve handler by socket slug set to avoid ordering issues and allow aliases
-    slug_set = get_interface_slug_set()
-    handlers_by_slugset = {
-        frozenset({
-            "bladder-cancer-tissue-biopsy-whole-slide-image",
-            "chimera-clinical-data-of-bladder-cancer-patients",
-            "tissue-mask",
-        }): interf0_handler,
-        frozenset({
-            # Allow alternate naming with '-wsi'
-            "bladder-cancer-tissue-biopsy-wsi",
-            "chimera-clinical-data-of-bladder-cancer-patients",
-            "tissue-mask",
-        }): interf0_handler,
-    }
-
-    handler = handlers_by_slugset.get(slug_set)
-    if handler is None:
-        print("Unknown interface sockets:", sorted(list(slug_set)))
-        print("Proceeding with default handler 'interf0_handler'.")
-        handler = interf0_handler
+    # Always use the default handler; robust to socket ordering/naming variations
+    # The handler itself resolves input directory naming differences.
+    handler = interf0_handler
 
     # Call the handler
     return handler()
@@ -64,15 +46,21 @@ def run():
 
 def interf0_handler():
     # Read the input - use thumbnail loading for tissue mask to avoid memory issues with large WSI tissue masks
-    input_tissue_mask = load_image_file_as_thumbnail(
-        location=INPUT_PATH / "images/tissue-mask",
-        max_size=1024,
+    tissue_mask_dir = _resolve_first_existing_dir(
+        base=INPUT_PATH / "images",
+        candidate_names=["tissue-mask"],
     )
-    # Use thumbnail loading for large WSI to avoid memory issues
-    input_bladder_cancer_tissue_biopsy_whole_slide_image = load_image_file_as_thumbnail(
-        location=INPUT_PATH / "images/bladder-cancer-tissue-biopsy-wsi",
-        max_size=1024,
+    input_tissue_mask = load_image_file_as_thumbnail(location=tissue_mask_dir, max_size=1024)
+
+    # Use thumbnail loading for large WSI to avoid memory issues; handle alias folder names
+    wsi_dir = _resolve_first_existing_dir(
+        base=INPUT_PATH / "images",
+        candidate_names=[
+            "bladder-cancer-tissue-biopsy-wsi",
+            "bladder-cancer-tissue-biopsy-whole-slide-image",
+        ],
     )
+    input_bladder_cancer_tissue_biopsy_whole_slide_image = load_image_file_as_thumbnail(location=wsi_dir, max_size=1024)
     input_chimera_clinical_data_of_bladder_cancer_patients = load_json_file(
         location=INPUT_PATH / "chimera-clinical-data-of-bladder-cancer-patients.json",
     )
@@ -288,6 +276,15 @@ def _show_torch_cuda_info():
         print(f"\tcurrent device: { (current_device := torch.cuda.current_device())}")
         print(f"\tproperties: {torch.cuda.get_device_properties(current_device)}")
     print("=+=" * 10)
+
+
+def _resolve_first_existing_dir(*, base: Path, candidate_names: list[str]) -> Path:
+    for name in candidate_names:
+        candidate = base / name
+        if candidate.exists():
+            return candidate
+    # Fall back to the first candidate to keep earlier behavior, even if missing
+    return base / candidate_names[0]
 
 
 def _load_autogluon_predictor(*, resource_dir: Path) -> TabularPredictor:
