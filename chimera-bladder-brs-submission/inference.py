@@ -1,0 +1,316 @@
+"""
+The following is a simple example algorithm.
+
+It is meant to run within a container.
+
+To run the container locally, you can call the following bash script:
+
+  ./do_test_run.sh
+
+This will start the inference and reads from ./test/input and writes to ./test/output
+
+To save the container and prep it for upload to Grand-Challenge.org you can call:
+
+  ./do_save.sh
+
+Any container that shows the same behaviour will do, this is purely an example of how one COULD do it.
+
+Reference the documentation to get details on the runtime environment on the platform:
+https://grand-challenge.org/documentation/runtime-environment/
+
+Happy programming!
+"""
+
+from pathlib import Path
+import json
+from glob import glob
+import pyvips
+import SimpleITK
+import numpy
+import random
+import pandas as pd
+from autogluon.tabular import TabularPredictor
+
+INPUT_PATH = Path("/input")
+OUTPUT_PATH = Path("/output")
+RESOURCE_PATH = Path("resources")
+
+
+def run():
+    # The key is a tuple of the slugs of the input sockets
+    interface_key = get_interface_key()
+
+    # Lookup the handler for this particular set of sockets (i.e. the interface)
+    handler = {
+        (
+            "bladder-cancer-tissue-biopsy-whole-slide-image",
+            "chimera-clinical-data-of-bladder-cancer-patients",
+            "tissue-mask",
+        ): interf0_handler,
+    }[interface_key]
+
+    # Call the handler
+    return handler()
+
+
+def interf0_handler():
+    # Read the input - use thumbnail loading for tissue mask to avoid memory issues with large WSI tissue masks
+    input_tissue_mask = load_image_file_as_thumbnail(
+        location=INPUT_PATH / "images/tissue-mask",
+        max_size=1024,
+    )
+    # Use thumbnail loading for large WSI to avoid memory issues
+    input_bladder_cancer_tissue_biopsy_whole_slide_image = load_image_file_as_thumbnail(
+        location=INPUT_PATH / "images/bladder-cancer-tissue-biopsy-wsi",
+        max_size=1024,
+    )
+    input_chimera_clinical_data_of_bladder_cancer_patients = load_json_file(
+        location=INPUT_PATH / "chimera-clinical-data-of-bladder-cancer-patients.json",
+    )
+
+    # Process the inputs: any way you'd like
+    _show_torch_cuda_info()
+
+    # Debug: Print information about loaded data
+    print("=+=" * 10)
+    print("Data Loading Summary:")
+    # Handle PyVips objects for tissue mask
+    if hasattr(input_tissue_mask, 'width'):
+        print(f"Tissue mask size: {input_tissue_mask.width}x{input_tissue_mask.height}")
+    else:
+        print(f"Tissue mask shape: {input_tissue_mask.shape}")
+    
+    print(f"Pathology WSI type: {type(input_bladder_cancer_tissue_biopsy_whole_slide_image)}")
+    if hasattr(input_bladder_cancer_tissue_biopsy_whole_slide_image, 'width'):
+        print(f"Pathology WSI size: {input_bladder_cancer_tissue_biopsy_whole_slide_image.width}x{input_bladder_cancer_tissue_biopsy_whole_slide_image.height}")
+    print(f"Clinical data keys: {list(input_chimera_clinical_data_of_bladder_cancer_patients.keys()) if input_chimera_clinical_data_of_bladder_cancer_patients else 'None'}")
+    print("=+=" * 10)
+
+    # Some additional resources might be required, include these in one of two ways.
+
+    # Option 1: part of the Docker-container image: resources/
+    resource_dir = Path("/opt/app/resources")
+    with open(resource_dir / "some_resource.txt", "r") as f:
+        print(f.read())
+
+    # Option 2: upload them as a separate tarball to Grand Challenge (go to your Algorithm > Models). The resources in the tarball will be extracted to `model_dir` at runtime.
+    model_dir = Path("/opt/ml/model")
+    try:
+        with open(
+            model_dir / "a_tarball_subdirectory" / "some_tarball_resource.txt", "r"
+        ) as f:
+            print(f.read())
+    except FileNotFoundError:
+        print("Model resource file not found - this is expected in test environment")
+
+    # Load AutoGluon predictor from resources and run inference on clinical data
+    predictor = _load_autogluon_predictor(resource_dir=Path("/opt/app/resources"))
+
+    clinical_df = pd.DataFrame([input_chimera_clinical_data_of_bladder_cancer_patients])
+    # Ensure no label columns are present at inference time
+    for col in ["BRS", "BRS_binary"]:
+        if col in clinical_df.columns:
+            clinical_df = clinical_df.drop(columns=[col])
+
+    # Get class probabilities as a DataFrame regardless of binary/multiclass
+    proba_df = predictor.predict_proba(clinical_df, as_multiclass=True)
+
+    # Prefer probability of class 'BRS3'. If unavailable, fall back sensibly.
+    if "BRS3" in proba_df.columns:
+        brs3_proba = float(proba_df.loc[proba_df.index[0], "BRS3"])
+    else:
+        # Try case-insensitive match
+        matching_cols = [c for c in proba_df.columns if str(c).upper() == "BRS3"]
+        if matching_cols:
+            brs3_proba = float(proba_df.loc[proba_df.index[0], matching_cols[0]])
+        else:
+            # As a last resort, if binary with two columns, assume the non-BRS1/2 column is BRS3
+            if len(proba_df.columns) == 2 and any("BRS1_2" == c for c in proba_df.columns):
+                other_col = [c for c in proba_df.columns if c != "BRS1_2"][0]
+                brs3_proba = float(proba_df.loc[proba_df.index[0], other_col])
+            else:
+                # Fallback to the max probability if class labels are unexpected
+                brs3_proba = float(proba_df.iloc[0].max())
+
+    output_brs_binary_classification = round(brs3_proba, 4)
+    print(f"Model prediction (BRS3 probability): {output_brs_binary_classification}")
+
+    # Save your output
+    write_json_file(
+        location=OUTPUT_PATH / "brs-probability.json",
+        content=output_brs_binary_classification,
+    )
+
+    return 0
+
+
+def get_interface_key():
+    # The inputs.json is a system generated file that contains information about
+    # the inputs that interface with the algorithm
+    inputs = load_json_file(
+        location=INPUT_PATH / "inputs.json",
+    )
+    socket_slugs = [sv["interface"]["slug"] for sv in inputs]
+    return tuple(sorted(socket_slugs))
+
+
+def load_json_file(*, location):
+    # Reads a json file
+    with open(location, "r") as f:
+        return json.loads(f.read())
+
+
+def write_json_file(*, location, content):
+    # Writes a json file
+    with open(location, "w") as f:
+        f.write(json.dumps(content, indent=4))
+
+
+def load_image_file_as_array(*, location):
+    """
+    Load image files using appropriate library based on file type:
+    - PyVips for pathology images: .tif, .tiff, .mrxs, .svs, .ndpi
+    - SimpleITK for radiology images: .mha
+    """
+    # Find all compatible files
+    input_files = (
+        glob(str(location / "*.tif"))
+        + glob(str(location / "*.tiff"))
+        + glob(str(location / "*.mha"))
+        + glob(str(location / "*.mrxs"))
+        + glob(str(location / "*.svs"))
+        + glob(str(location / "*.ndpi"))
+    )
+    
+    if not input_files:
+        raise FileNotFoundError(f"No compatible image files found in {location}")
+    
+    file_path = input_files[0]
+    file_extension = Path(file_path).suffix.lower()
+    
+    if file_extension == '.mha':
+        # Use SimpleITK for radiology images (.mha)
+        print(f"Loading radiology image using SimpleITK: {file_path}")
+        image = SimpleITK.ReadImage(file_path)
+        array = SimpleITK.GetArrayFromImage(image)
+        return array
+    
+    else:
+        # Use PyVips for pathology images (.tif, .tiff, .mrxs, .svs, .ndpi)
+        print(f"Loading pathology image using PyVips: {file_path}")
+        image = pyvips.Image.new_from_file(file_path)
+        
+        # For very large images, you might want to downsample first
+        # Uncomment the next line to downsample by factor of 4 to save memory
+        # image = image.resize(0.25)
+        
+        # Convert to numpy array
+        # Note: This will load the entire image into memory
+        # For production use, consider processing tiles instead
+        memory_image = image.write_to_memory()
+        array = numpy.frombuffer(memory_image, dtype=numpy.uint8)
+        
+        # Reshape based on image dimensions and bands
+        height = image.height
+        width = image.width
+        bands = image.bands
+        
+        if bands == 1:
+            # Grayscale image
+            array = array.reshape((height, width))
+        else:
+            # Multi-channel image (RGB, RGBA, etc.)
+            array = array.reshape((height, width, bands))
+        
+        return array
+
+
+def load_image_file_as_thumbnail(*, location, max_size=1024):
+    """
+    Load image as a thumbnail for memory-efficient processing of WSIs
+    This is recommended for actual whole slide images
+    Returns the PyVips image object directly for memory efficiency
+    """
+    input_files = (
+        glob(str(location / "*.tif"))
+        + glob(str(location / "*.tiff"))
+        + glob(str(location / "*.mha"))
+        + glob(str(location / "*.mrxs"))
+        + glob(str(location / "*.svs"))
+        + glob(str(location / "*.ndpi"))
+    )
+    
+    if not input_files:
+        raise FileNotFoundError(f"No compatible image files found in {location}")
+    
+    file_path = input_files[0]
+    print(f"Loading pathology image as thumbnail using PyVips: {file_path}")
+    
+    # Load image with PyVips
+    image = pyvips.Image.new_from_file(file_path)
+    
+    # Calculate downsampling factor to fit within max_size
+    scale_factor = min(max_size / image.width, max_size / image.height)
+    if scale_factor < 1.0:
+        print(f"Downsampling image by factor {scale_factor:.3f} (from {image.width}x{image.height} to {int(image.width*scale_factor)}x{int(image.height*scale_factor)})")
+        image = image.resize(scale_factor)
+    else:
+        print(f"Image size {image.width}x{image.height} is within max_size={max_size}, no downsampling needed")
+    
+    # Return the PyVips image object directly (much more memory efficient)
+    return image
+
+
+def _show_torch_cuda_info():
+    import torch
+
+    print("=+=" * 10)
+    print("Collecting Torch CUDA information")
+    print(f"Torch CUDA is available: {(available := torch.cuda.is_available())}")
+    if available:
+        print(f"\tnumber of devices: {torch.cuda.device_count()}")
+        print(f"\tcurrent device: { (current_device := torch.cuda.current_device())}")
+        print(f"\tproperties: {torch.cuda.get_device_properties(current_device)}")
+    print("=+=" * 10)
+
+
+def _load_autogluon_predictor(*, resource_dir: Path) -> TabularPredictor:
+    """
+    Locate and load an AutoGluon TabularPredictor from the given resources directory.
+    Expects the predictor directory containing 'model.pkl'.
+    """
+    # Common cases:
+    # - resource_dir points directly to the predictor directory
+    # - predictor directory is nested somewhere under resource_dir
+    candidate_paths = []
+
+    # Case 1: Directly in resource_dir
+    if (resource_dir / "model.pkl").exists():
+        candidate_paths.append(resource_dir)
+
+    # Case 2: Any child directory that contains model.pkl
+    for p in resource_dir.rglob("model.pkl"):
+        candidate_paths.append(p.parent)
+
+    # De-duplicate while preserving order
+    seen = set()
+    unique_candidates = []
+    for p in candidate_paths:
+        sp = str(p.resolve())
+        if sp not in seen:
+            seen.add(sp)
+            unique_candidates.append(p)
+
+    if not unique_candidates:
+        raise FileNotFoundError(
+            f"Could not find an AutoGluon predictor directory (missing model.pkl) under {resource_dir}"
+        )
+
+    # Prefer the shallowest path (shortest depth)
+    predictor_path = sorted(unique_candidates, key=lambda q: len(q.parts))[0]
+    print(f"Loading AutoGluon TabularPredictor from: {predictor_path}")
+    return TabularPredictor.load(predictor_path)
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())
