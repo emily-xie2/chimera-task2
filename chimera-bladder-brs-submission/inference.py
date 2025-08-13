@@ -27,7 +27,6 @@ from glob import glob
 import pyvips
 import SimpleITK
 import numpy
-import random
 import pandas as pd
 from autogluon.tabular import TabularPredictor
 
@@ -37,17 +36,27 @@ RESOURCE_PATH = Path("resources")
 
 
 def run():
-    # The key is a tuple of the slugs of the input sockets
-    interface_key = get_interface_key()
-
-    # Lookup the handler for this particular set of sockets (i.e. the interface)
-    handler = {
-        (
+    # Resolve handler by socket slug set to avoid ordering issues and allow aliases
+    slug_set = get_interface_slug_set()
+    handlers_by_slugset = {
+        frozenset({
             "bladder-cancer-tissue-biopsy-whole-slide-image",
             "chimera-clinical-data-of-bladder-cancer-patients",
             "tissue-mask",
-        ): interf0_handler,
-    }[interface_key]
+        }): interf0_handler,
+        frozenset({
+            # Allow alternate naming with '-wsi'
+            "bladder-cancer-tissue-biopsy-wsi",
+            "chimera-clinical-data-of-bladder-cancer-patients",
+            "tissue-mask",
+        }): interf0_handler,
+    }
+
+    handler = handlers_by_slugset.get(slug_set)
+    if handler is None:
+        print("Unknown interface sockets:", sorted(list(slug_set)))
+        print("Proceeding with default handler 'interf0_handler'.")
+        handler = interf0_handler
 
     # Call the handler
     return handler()
@@ -152,6 +161,13 @@ def get_interface_key():
     )
     socket_slugs = [sv["interface"]["slug"] for sv in inputs]
     return tuple(sorted(socket_slugs))
+def get_interface_slug_set():
+    inputs = load_json_file(
+        location=INPUT_PATH / "inputs.json",
+    )
+    socket_slugs = [sv["interface"]["slug"] for sv in inputs]
+    return frozenset(socket_slugs)
+
 
 
 def load_json_file(*, location):
