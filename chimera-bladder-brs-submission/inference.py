@@ -27,6 +27,7 @@ from glob import glob
 import pyvips
 import SimpleITK
 import numpy
+import random
 import pandas as pd
 from autogluon.tabular import TabularPredictor
 
@@ -36,9 +37,17 @@ RESOURCE_PATH = Path("resources")
 
 
 def run():
-    # Always use the default handler; robust to socket ordering/naming variations
-    # The handler itself resolves input directory naming differences.
-    handler = interf0_handler
+    # The key is a tuple of the slugs of the input sockets
+    interface_key = get_interface_key()
+
+    # Lookup the handler for this particular set of sockets (i.e. the interface)
+    handler = {
+        (
+            "bladder-cancer-tissue-biopsy-whole-slide-image",
+            "chimera-clinical-data-of-bladder-cancer-patients",
+            "tissue-mask",
+        ): interf0_handler,
+    }[interface_key]
 
     # Call the handler
     return handler()
@@ -46,21 +55,15 @@ def run():
 
 def interf0_handler():
     # Read the input - use thumbnail loading for tissue mask to avoid memory issues with large WSI tissue masks
-    tissue_mask_dir = _resolve_first_existing_dir(
-        base=INPUT_PATH / "images",
-        candidate_names=["tissue-mask"],
+    input_tissue_mask = load_image_file_as_thumbnail(
+        location=INPUT_PATH / "images/tissue-mask",
+        max_size=1024,
     )
-    input_tissue_mask = load_image_file_as_thumbnail(location=tissue_mask_dir, max_size=1024)
-
-    # Use thumbnail loading for large WSI to avoid memory issues; handle alias folder names
-    wsi_dir = _resolve_first_existing_dir(
-        base=INPUT_PATH / "images",
-        candidate_names=[
-            "bladder-cancer-tissue-biopsy-wsi",
-            "bladder-cancer-tissue-biopsy-whole-slide-image",
-        ],
+    # Use thumbnail loading for large WSI to avoid memory issues
+    input_bladder_cancer_tissue_biopsy_whole_slide_image = load_image_file_as_thumbnail(
+        location=INPUT_PATH / "images/bladder-cancer-tissue-biopsy-wsi",
+        max_size=1024,
     )
-    input_bladder_cancer_tissue_biopsy_whole_slide_image = load_image_file_as_thumbnail(location=wsi_dir, max_size=1024)
     input_chimera_clinical_data_of_bladder_cancer_patients = load_json_file(
         location=INPUT_PATH / "chimera-clinical-data-of-bladder-cancer-patients.json",
     )
@@ -149,13 +152,6 @@ def get_interface_key():
     )
     socket_slugs = [sv["interface"]["slug"] for sv in inputs]
     return tuple(sorted(socket_slugs))
-def get_interface_slug_set():
-    inputs = load_json_file(
-        location=INPUT_PATH / "inputs.json",
-    )
-    socket_slugs = [sv["interface"]["slug"] for sv in inputs]
-    return frozenset(socket_slugs)
-
 
 
 def load_json_file(*, location):
@@ -278,19 +274,10 @@ def _show_torch_cuda_info():
     print("=+=" * 10)
 
 
-def _resolve_first_existing_dir(*, base: Path, candidate_names: list[str]) -> Path:
-    for name in candidate_names:
-        candidate = base / name
-        if candidate.exists():
-            return candidate
-    # Fall back to the first candidate to keep earlier behavior, even if missing
-    return base / candidate_names[0]
-
-
 def _load_autogluon_predictor(*, resource_dir: Path) -> TabularPredictor:
     """
     Locate and load an AutoGluon TabularPredictor from the given resources directory.
-    Expects the predictor directory containing 'model.pkl'.
+    Expects the predictor directory containing 'learner.pkl'.
     """
     # Common cases:
     # - resource_dir points directly to the predictor directory
@@ -298,11 +285,11 @@ def _load_autogluon_predictor(*, resource_dir: Path) -> TabularPredictor:
     candidate_paths = []
 
     # Case 1: Directly in resource_dir
-    if (resource_dir / "model.pkl").exists():
+    if (resource_dir / "learner.pkl").exists():
         candidate_paths.append(resource_dir)
 
-    # Case 2: Any child directory that contains model.pkl
-    for p in resource_dir.rglob("model.pkl"):
+    # Case 2: Any child directory that contains learner.pkl
+    for p in resource_dir.rglob("learner.pkl"):
         candidate_paths.append(p.parent)
 
     # De-duplicate while preserving order
@@ -316,7 +303,7 @@ def _load_autogluon_predictor(*, resource_dir: Path) -> TabularPredictor:
 
     if not unique_candidates:
         raise FileNotFoundError(
-            f"Could not find an AutoGluon predictor directory (missing model.pkl) under {resource_dir}"
+            f"Could not find an AutoGluon predictor directory (missing learner.pkl) under {resource_dir}"
         )
 
     # Prefer the shallowest path (shortest depth)
