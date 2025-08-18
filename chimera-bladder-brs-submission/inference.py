@@ -79,15 +79,36 @@ def preprocess_clinical_data(clinical_data):
 def run():
     # The key is a tuple of the slugs of the input sockets
     interface_key = get_interface_key()
+    
+    print(f"DEBUG: Detected interface key: {interface_key}")
 
     # Lookup the handler for this particular set of sockets (i.e. the interface)
-    handler = {
+    handler_map = {
         (
             "bladder-cancer-tissue-biopsy-whole-slide-image",
             "chimera-clinical-data-of-bladder-cancer-patients",
             "tissue-mask",
         ): interf0_handler,
-    }[interface_key]
+        # Add variations that might occur
+        (
+            "bladder-cancer-tissue-biopsy-wsi",
+            "chimera-clinical-data-of-bladder-cancer-patients",
+            "tissue-mask",
+        ): interf0_handler,
+        (
+            "bladder-cancer-tissue-biopsy-whole-slide-image",
+            "chimera-clinical-data-of-bladder-cancer-recurrence",
+            "tissue-mask",
+        ): interf0_handler,
+    }
+    
+    if interface_key in handler_map:
+        handler = handler_map[interface_key]
+    else:
+        print(f"ERROR: No handler found for interface key: {interface_key}")
+        print(f"Available handlers: {list(handler_map.keys())}")
+        # Fallback to the main handler anyway
+        handler = interf0_handler
 
     # Call the handler
     return handler()
