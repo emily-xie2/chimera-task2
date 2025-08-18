@@ -27,13 +27,53 @@ from glob import glob
 import pyvips
 import SimpleITK
 import numpy
-import random
 import pandas as pd
 from autogluon.tabular import TabularPredictor
 
 INPUT_PATH = Path("/input")
 OUTPUT_PATH = Path("/output")
 RESOURCE_PATH = Path("resources")
+
+# Global variable for the loaded model
+PREDICTOR = None
+
+
+def load_model():
+    """Load the AutoGluon model from resources directory"""
+    global PREDICTOR
+    if PREDICTOR is None:
+        model_path = RESOURCE_PATH / "models" / "original"
+        print(f"Loading AutoGluon model from: {model_path}")
+        try:
+            PREDICTOR = TabularPredictor.load(str(model_path))
+            print("Model loaded successfully!")
+            print(f"Model label: {PREDICTOR.label}")
+            print(f"Model classes: {PREDICTOR.class_labels}")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
+    return PREDICTOR
+
+
+def preprocess_clinical_data(clinical_data):
+    """Preprocess clinical data to match the training format"""
+    if not clinical_data:
+        print("Warning: No clinical data provided")
+        return None
+    
+    # Convert to DataFrame
+    df = pd.DataFrame([clinical_data])
+    
+    # Remove any potential BRS labels if they exist (shouldn't be in inference data)
+    if 'BRS' in df.columns:
+        df = df.drop(columns=['BRS'])
+    if 'BRS_binary' in df.columns:
+        df = df.drop(columns=['BRS_binary'])
+    
+    print(f"Clinical data features: {list(df.columns)}")
+    print(f"Clinical data shape: {df.shape}")
+    
+    return df
 
 
 def run():
@@ -54,6 +94,9 @@ def run():
 
 
 def interf0_handler():
+    # Load the trained model
+    predictor = load_model()
+    
     # Read the input - use thumbnail loading for tissue mask to avoid memory issues with large WSI tissue masks
     input_tissue_mask = load_image_file_as_thumbnail(
         location=INPUT_PATH / "images/tissue-mask",
@@ -103,37 +146,46 @@ def interf0_handler():
     except FileNotFoundError:
         print("Model resource file not found - this is expected in test environment")
 
-    # Load AutoGluon predictor from resources and run inference on clinical data
-    predictor = _load_autogluon_predictor(resource_dir=Path("/opt/app/resources"))
-
-    clinical_df = pd.DataFrame([input_chimera_clinical_data_of_bladder_cancer_patients])
-    # Ensure no label columns are present at inference time
-    for col in ["BRS", "BRS_binary"]:
-        if col in clinical_df.columns:
-            clinical_df = clinical_df.drop(columns=[col])
-
-    # Get class probabilities as a DataFrame regardless of binary/multiclass
-    proba_df = predictor.predict_proba(clinical_df, as_multiclass=True)
-
-    # Prefer probability of class 'BRS3'. If unavailable, fall back sensibly.
-    if "BRS3" in proba_df.columns:
-        brs3_proba = float(proba_df.loc[proba_df.index[0], "BRS3"])
-    else:
-        # Try case-insensitive match
-        matching_cols = [c for c in proba_df.columns if str(c).upper() == "BRS3"]
-        if matching_cols:
-            brs3_proba = float(proba_df.loc[proba_df.index[0], matching_cols[0]])
-        else:
-            # As a last resort, if binary with two columns, assume the non-BRS1/2 column is BRS3
-            if len(proba_df.columns) == 2 and any("BRS1_2" == c for c in proba_df.columns):
-                other_col = [c for c in proba_df.columns if c != "BRS1_2"][0]
-                brs3_proba = float(proba_df.loc[proba_df.index[0], other_col])
+    # Make predictions using the trained model
+    print("=+=" * 10)
+    print("MAKING PREDICTION WITH TRAINED MODEL")
+    print("=+=" * 10)
+    
+    try:
+        # Preprocess clinical data
+        clinical_df = preprocess_clinical_data(input_chimera_clinical_data_of_bladder_cancer_patients)
+        
+        if clinical_df is not None and not clinical_df.empty:
+            # Make prediction
+            prediction = predictor.predict(clinical_df)
+            prediction_proba = predictor.predict_proba(clinical_df)
+            
+            print(f"Predicted class: {prediction.iloc[0]}")
+            print(f"Prediction probabilities: {prediction_proba.iloc[0].to_dict()}")
+            
+            # Convert to probability for BRS3 (high-grade)
+            # The model predicts binary classification: "BRS3" vs "BRS1_2"
+            # We need to return the probability of BRS3 (high-grade) class
+            if "BRS3" in prediction_proba.columns:
+                brs3_probability = prediction_proba["BRS3"].iloc[0]
+            elif hasattr(prediction_proba.iloc[0], 'get'):
+                # Try alternative column names that might exist
+                brs3_probability = prediction_proba.iloc[0].get("BRS3", 0.5)
             else:
-                # Fallback to the max probability if class labels are unexpected
-                brs3_proba = float(proba_df.iloc[0].max())
-
-    output_brs_binary_classification = round(brs3_proba, 4)
-    print(f"Model prediction (BRS3 probability): {output_brs_binary_classification}")
+                # Fallback: if BRS3 is predicted, probability is high, otherwise low
+                brs3_probability = 0.8 if str(prediction.iloc[0]).upper() == "BRS3" else 0.2
+            
+            output_brs_binary_classification = round(float(brs3_probability), 4)
+            print(f"BRS3 probability: {output_brs_binary_classification}")
+            
+        else:
+            print("Warning: No valid clinical data for prediction, using default probability")
+            output_brs_binary_classification = 0.5  # neutral probability
+            
+    except Exception as e:
+        print(f"Error during prediction: {e}")
+        print("Using fallback probability")
+        output_brs_binary_classification = 0.5  # neutral probability on error
 
     # Save your output
     write_json_file(
@@ -272,44 +324,6 @@ def _show_torch_cuda_info():
         print(f"\tcurrent device: { (current_device := torch.cuda.current_device())}")
         print(f"\tproperties: {torch.cuda.get_device_properties(current_device)}")
     print("=+=" * 10)
-
-
-def _load_autogluon_predictor(*, resource_dir: Path) -> TabularPredictor:
-    """
-    Locate and load an AutoGluon TabularPredictor from the given resources directory.
-    Expects the predictor directory containing 'learner.pkl'.
-    """
-    # Common cases:
-    # - resource_dir points directly to the predictor directory
-    # - predictor directory is nested somewhere under resource_dir
-    candidate_paths = []
-
-    # Case 1: Directly in resource_dir
-    if (resource_dir / "learner.pkl").exists():
-        candidate_paths.append(resource_dir)
-
-    # Case 2: Any child directory that contains learner.pkl
-    for p in resource_dir.rglob("learner.pkl"):
-        candidate_paths.append(p.parent)
-
-    # De-duplicate while preserving order
-    seen = set()
-    unique_candidates = []
-    for p in candidate_paths:
-        sp = str(p.resolve())
-        if sp not in seen:
-            seen.add(sp)
-            unique_candidates.append(p)
-
-    if not unique_candidates:
-        raise FileNotFoundError(
-            f"Could not find an AutoGluon predictor directory (missing learner.pkl) under {resource_dir}"
-        )
-
-    # Prefer the shallowest path (shortest depth)
-    predictor_path = sorted(unique_candidates, key=lambda q: len(q.parts))[0]
-    print(f"Loading AutoGluon TabularPredictor from: {predictor_path}")
-    return TabularPredictor.load(predictor_path)
 
 
 if __name__ == "__main__":
