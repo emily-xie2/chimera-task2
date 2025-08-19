@@ -138,7 +138,20 @@ def interf0_handler():
             )
 
         print(f"Loading AutoGluon predictor from: {model_dir}")
-        predictor = TabularPredictor.load(str(model_dir))
+        try:
+            predictor = TabularPredictor.load(str(model_dir))
+        except Exception as load_err:
+            # Handle Python version mismatch gracefully
+            if "Python version" in str(load_err) or "require_py_version_match" in str(load_err):
+                print(
+                    "Warning while loading predictor (likely Python version mismatch). "
+                    "Retrying with require_py_version_match=False."
+                )
+                predictor = TabularPredictor.load(
+                    str(model_dir), require_py_version_match=False
+                )
+            else:
+                raise
 
         # Convert clinical JSON to DataFrame
         clinical_df = pd.DataFrame([input_chimera_clinical_data_of_bladder_cancer_patients])
