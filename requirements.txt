@@ -3,3 +3,5 @@ numpy
 pyvips
 autogluon.tabular
 pandas
+autogluon.multimodal
+xgboost

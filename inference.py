@@ -138,6 +138,14 @@ def interf0_handler():
             )
 
         print(f"Loading AutoGluon predictor from: {model_dir}")
+        # Ensure XGBoost is available if the predictor depends on it
+        try:
+            import xgboost  # type: ignore  # noqa: F401
+        except Exception as dep_err:
+            raise RuntimeError(
+                "Required dependency 'xgboost' is not installed. "
+                "Add 'xgboost' to requirements.txt, rebuild the image, and retry."
+            ) from dep_err
         try:
             predictor = TabularPredictor.load(str(model_dir))
         except Exception as load_err:
@@ -151,6 +159,12 @@ def interf0_handler():
                     str(model_dir), require_py_version_match=False
                 )
             else:
+                # Bubble up dependency-related hints if applicable
+                if "No module named 'xgboost'" in str(load_err) or "No module named xgboost" in str(load_err):
+                    raise RuntimeError(
+                        "AutoGluon predictor requires 'xgboost' but it was not found at runtime. "
+                        "Ensure 'xgboost' is listed in requirements.txt and rebuild the Docker image."
+                    ) from load_err
                 raise
 
         # Convert clinical JSON to DataFrame
@@ -192,9 +206,8 @@ def interf0_handler():
 
         print(f"Model prediction (prob {target_class}): {output_brs_binary_classification:.4f}")
     except Exception as e:
-        print(f"Falling back to random prediction due to error: {e}")
-        output_brs_binary_classification = round(random.uniform(0.0, 1.0), 4)
-        print(f"Random prediction: {output_brs_binary_classification}")
+        # Fail fast and loudly; do not emit random predictions
+        raise
 
     # Save your output
     write_json_file(
