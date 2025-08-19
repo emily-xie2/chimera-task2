@@ -103,12 +103,41 @@ def interf0_handler():
     except FileNotFoundError:
         print("Model resource file not found - this is expected in test environment")
 
-    # Try to load trained AutoGluon XGBoost model and predict BRS3 probability
+    # Try to load a trained AutoGluon model and predict BRS3 probability
     try:
-        model_dir = Path("/opt/app/resources/models/xgboost_final")
-        if not model_dir.exists():
-            raise FileNotFoundError(f"Model directory not found: {model_dir}")
+        # Prefer resources root if it looks like an AutoGluon predictor dir
+        base_resources_dir = Path("/opt/app/resources")
 
+        def _is_predictor_dir(path: Path) -> bool:
+            return (path / "predictor.pkl").exists() or (path / "learner.pkl").exists()
+
+        candidate_dirs = []
+        # 1) resources/
+        candidate_dirs.append(base_resources_dir)
+        # 2) resources/models/xgboost_final
+        candidate_dirs.append(base_resources_dir / "models" / "xgboost_final")
+        # 3) any subdir under resources/models that contains predictor artifacts
+        models_root = base_resources_dir / "models"
+        if models_root.exists():
+            for sub in models_root.iterdir():
+                if sub.is_dir():
+                    candidate_dirs.append(sub)
+
+        model_dir = None
+        for cand in candidate_dirs:
+            try:
+                if cand.exists() and _is_predictor_dir(cand):
+                    model_dir = cand
+                    break
+            except Exception:
+                continue
+
+        if model_dir is None:
+            raise FileNotFoundError(
+                f"No valid AutoGluon predictor directory found under {base_resources_dir}"
+            )
+
+        print(f"Loading AutoGluon predictor from: {model_dir}")
         predictor = TabularPredictor.load(str(model_dir))
 
         # Convert clinical JSON to DataFrame
@@ -121,15 +150,19 @@ def interf0_handler():
         # Predict probabilities and extract BRS3 probability
         proba_df = predictor.predict_proba(clinical_df)
 
-        # Positive class may be 'BRS3'. If not present, fallback to taking the max class probability for 'BRS3' if available
+        # Determine positive class
         positive_class = None
-        metadata_path = model_dir / "model_metadata.json"
-        if metadata_path.exists():
-            try:
-                metadata = json.loads(metadata_path.read_text())
-                positive_class = metadata.get("positive_class")
-            except Exception:
-                positive_class = None
+        # Prefer model-local metadata, then fall back to base resources metadata
+        metadata_paths = [model_dir / "model_metadata.json", base_resources_dir / "model_metadata.json"]
+        for metadata_path in metadata_paths:
+            if metadata_path.exists():
+                try:
+                    metadata = json.loads(metadata_path.read_text())
+                    positive_class = metadata.get("positive_class")
+                    if positive_class:
+                        break
+                except Exception:
+                    pass
 
         target_class = positive_class or "BRS3"
 
