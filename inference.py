@@ -114,8 +114,8 @@ def interf0_handler():
         candidate_dirs = []
         # 1) resources/
         candidate_dirs.append(base_resources_dir)
-        # 2) resources/models/xgboost_final
-        candidate_dirs.append(base_resources_dir / "models" / "xgboost_final")
+        # 2) resources/models/rf_final
+        candidate_dirs.append(base_resources_dir / "models" / "rf_final")
         # 3) any subdir under resources/models that contains predictor artifacts
         models_root = base_resources_dir / "models"
         if models_root.exists():
