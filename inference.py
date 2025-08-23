@@ -30,6 +30,7 @@ import numpy
 import random
 import pandas as pd
 from autogluon.tabular import TabularPredictor
+from typing import Optional, Dict, Any, List
 
 INPUT_PATH = Path("/input")
 OUTPUT_PATH = Path("/output")
@@ -103,7 +104,7 @@ def interf0_handler():
     except FileNotFoundError:
         print("Model resource file not found - this is expected in test environment")
 
-    # Try to load a trained AutoGluon model and predict BRS3 probability
+    # Try to load a trained AutoGluon model or ensemble and predict BRS3 probability
     try:
         # Prefer resources root if it looks like an AutoGluon predictor dir
         base_resources_dir = Path("/opt/app/resources")
@@ -111,78 +112,25 @@ def interf0_handler():
         def _is_predictor_dir(path: Path) -> bool:
             return (path / "predictor.pkl").exists() or (path / "learner.pkl").exists()
 
-        # First, try to load ensemble config for AvgBoost 4x10
-        ensemble_cfg = base_resources_dir / "models" / "ensemble_AvgBoost_4x10.json"
-        if ensemble_cfg.exists():
-            cfg = json.loads(ensemble_cfg.read_text())
-            families = cfg.get('families', [])
-            weights_per_family = cfg.get('weights_per_family', {})
-            fold_rel_paths = cfg.get('fold_rel_paths', [])
-            family_model_by_fold = cfg.get('family_model_by_fold', {})
-            label = cfg.get('label', None)
-            positive_class = cfg.get('positive_class', 'BRS3')
+        # Prefer ensemble config if available
+        ensemble_cfg_path = base_resources_dir / "models" / "ensemble_CAT_RF_20.json"
+        use_ensemble = ensemble_cfg_path.exists()
 
-            # Ensure XGBoost dependency if needed
+        def _load_predictor_safely(path: Path) -> TabularPredictor:
             try:
-                import xgboost  # type: ignore  # noqa: F401
-            except Exception as dep_err:
-                raise RuntimeError(
-                    "Required dependency 'xgboost' is not installed. "
-                    "Add 'xgboost' to requirements.txt, rebuild the image, and retry."
-                ) from dep_err
+                return TabularPredictor.load(str(path))
+            except Exception as load_err:
+                if "Python version" in str(load_err) or "require_py_version_match" in str(load_err):
+                    print(
+                        "Warning while loading predictor (likely Python version mismatch). "
+                        "Retrying with require_py_version_match=False."
+                    )
+                    return TabularPredictor.load(str(path), require_py_version_match=False)
+                raise
 
-            # Convert clinical JSON to DataFrame
-            clinical_df = pd.DataFrame([input_chimera_clinical_data_of_bladder_cancer_patients])
-            if label and label in clinical_df.columns:
-                clinical_df = clinical_df.drop(columns=[label])
-
-            # Collect per-family predictions across folds
-            preds_by_family = {fam: [] for fam in families}
-            for idx, rel_path in enumerate(fold_rel_paths, start=1):
-                fold_dir = base_resources_dir / rel_path
-                if not fold_dir.exists():
-                    continue
-                try:
-                    p = TabularPredictor.load(str(fold_dir), require_py_version_match=False)
-                except Exception:
-                    continue
-
-                fold_key = str(idx)
-                fam_to_model = family_model_by_fold.get(fold_key, {})
-                for fam in families:
-                    mname = fam_to_model.get(fam)
-                    if not mname:
-                        continue
-                    try:
-                        proba_df = p.predict_proba(clinical_df, model=mname)
-                        if hasattr(proba_df, 'columns'):
-                            if positive_class in proba_df.columns:
-                                val = float(proba_df[positive_class].iloc[0])
-                            else:
-                                val = float(proba_df.max(axis=1).iloc[0])
-                        else:
-                            val = float(proba_df[0])
-                        preds_by_family[fam].append(val)
-                    except Exception:
-                        continue
-
-            # Compute weighted mean of family means
-            num = 0.0
-            den = 0.0
-            for fam, preds in preds_by_family.items():
-                if not preds:
-                    continue
-                fam_mean = float(sum(preds) / len(preds))
-                w = float(weights_per_family.get(fam, 0.0))
-                num += w * fam_mean
-                den += w
-            if den > 0:
-                output_brs_binary_classification = num / den
-            else:
-                raise RuntimeError("Ensemble config found but no valid family predictions were produced.")
-            print(f"Ensemble_AvgBoost_4x10 prediction (prob {positive_class}): {output_brs_binary_classification:.4f}")
+        if use_ensemble:
+            print(f"Using ensemble config: {ensemble_cfg_path}")
         else:
-            # Fallback to single-predictor inference
             candidate_dirs = []
             # 1) resources/
             candidate_dirs.append(base_resources_dir)
@@ -218,34 +166,21 @@ def interf0_handler():
                     "Required dependency 'xgboost' is not installed. "
                     "Add 'xgboost' to requirements.txt, rebuild the image, and retry."
                 ) from dep_err
-            try:
-                predictor = TabularPredictor.load(str(model_dir))
-            except Exception as load_err:
-                # Handle Python version mismatch gracefully
-                if "Python version" in str(load_err) or "require_py_version_match" in str(load_err):
-                    print(
-                        "Warning while loading predictor (likely Python version mismatch). "
-                        "Retrying with require_py_version_match=False."
-                    )
-                    predictor = TabularPredictor.load(
-                        str(model_dir), require_py_version_match=False
-                    )
-                else:
-                    # Bubble up dependency-related hints if applicable
-                    if "No module named 'xgboost'" in str(load_err) or "No module named xgboost" in str(load_err):
-                        raise RuntimeError(
-                            "AutoGluon predictor requires 'xgboost' but it was not found at runtime. "
-                            "Ensure 'xgboost' is listed in requirements.txt and rebuild the Docker image."
-                        ) from load_err
-                    raise
+            predictor = _load_predictor_safely(model_dir)
 
-            # Convert clinical JSON to DataFrame
-            clinical_df = pd.DataFrame([input_chimera_clinical_data_of_bladder_cancer_patients])
+        # Convert clinical JSON to DataFrame
+        clinical_df = pd.DataFrame([input_chimera_clinical_data_of_bladder_cancer_patients])
 
-            # Ensure target column is not present
-            if predictor.label in clinical_df.columns:
-                clinical_df = clinical_df.drop(columns=[predictor.label])
+        # Ensure target column is not present
+        if predictor.label in clinical_df.columns:
+            clinical_df = clinical_df.drop(columns=[predictor.label])
 
+        if use_ensemble:
+            output_brs_binary_classification = _predict_with_cat_rf_ensemble(
+                base_resources_dir=base_resources_dir,
+                clinical_df=clinical_df,
+            )
+        else:
             # Predict probabilities and extract BRS3 probability
             proba_df = predictor.predict_proba(clinical_df)
 
@@ -276,7 +211,7 @@ def interf0_handler():
                 # Series / ndarray case (assumed positive class probability)
                 output_brs_binary_classification = float(proba_df[0])
 
-        print(f"Model prediction (prob BRS3): {output_brs_binary_classification:.4f}")
+        print(f"Model prediction (prob {target_class}): {output_brs_binary_classification:.4f}")
     except Exception as e:
         # Fail fast and loudly; do not emit random predictions
         raise
@@ -422,3 +357,70 @@ def _show_torch_cuda_info():
 
 if __name__ == "__main__":
     raise SystemExit(run())
+
+
+def _predict_with_cat_rf_ensemble(*, base_resources_dir: Path, clinical_df: pd.DataFrame) -> float:
+    """Predict probability via Ensemble_CAT_RF_20 config using weighted mean over models.
+
+    The config file is expected at base_resources_dir / 'models' / 'ensemble_CAT_RF_20.json'.
+    """
+    cfg_path = base_resources_dir / "models" / "ensemble_CAT_RF_20.json"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Ensemble config not found: {cfg_path}")
+
+    cfg = json.loads(cfg_path.read_text())
+    positive_class = cfg.get("positive_class") or "BRS3"
+    models: List[Dict[str, Any]] = cfg.get("models", [])
+    if not models:
+        raise RuntimeError("Ensemble config has no models")
+
+    # Accumulate weighted probabilities and total weight
+    prob_sum = 0.0
+    weight_sum = 0.0
+
+    # For better robustness, attempt to import catboost since ensemble may require it
+    try:
+        import catboost  # type: ignore  # noqa: F401
+    except Exception:
+        # If missing, we'll still try RF-only models
+        print("Warning: 'catboost' not available; CAT models may be skipped during ensemble inference")
+
+    # helper: local safe loader
+    def _load_predictor_safely(path: Path) -> TabularPredictor:
+        try:
+            return TabularPredictor.load(str(path))
+        except Exception as load_err:
+            if "Python version" in str(load_err) or "require_py_version_match" in str(load_err):
+                print(
+                    "Warning while loading predictor (likely Python version mismatch). "
+                    "Retrying with require_py_version_match=False."
+                )
+                return TabularPredictor.load(str(path), require_py_version_match=False)
+            raise
+
+    for entry in models:
+        try:
+            rel_path = entry.get("fold_rel_path")
+            model_name = entry.get("model_name")
+            weight = float(entry.get("weight", 0.0))
+            if not rel_path or not model_name or weight <= 0.0:
+                continue
+            model_dir = base_resources_dir / rel_path
+            predictor = _load_predictor_safely(model_dir)
+            proba_df = predictor.predict_proba(clinical_df, model=model_name)
+            if hasattr(proba_df, 'columns'):
+                if positive_class in proba_df.columns:
+                    p = float(proba_df[positive_class].iloc[0])
+                else:
+                    p = float(proba_df.max(axis=1).iloc[0])
+            else:
+                p = float(proba_df[0])
+            prob_sum += weight * p
+            weight_sum += weight
+        except Exception as _e:
+            print(f"Warning: skipping model in ensemble due to error: {_e}")
+
+    if weight_sum <= 0.0:
+        raise RuntimeError("All models failed during ensemble inference; cannot compute prediction")
+
+    return prob_sum / weight_sum
