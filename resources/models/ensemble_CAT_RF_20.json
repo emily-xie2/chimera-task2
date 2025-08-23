@@ -1,0 +1,67 @@
+{
+  "ensemble_name": "Ensemble_CAT_RF_20",
+  "families": [
+    "CAT",
+    "RF"
+  ],
+  "weights": {
+    "CAT": 0.0,
+    "RF": 1.0
+  },
+  "fold_rel_paths": [
+    "models/cv_fold_1",
+    "models/cv_fold_2",
+    "models/cv_fold_3",
+    "models/cv_fold_4",
+    "models/cv_fold_5",
+    "models/cv_fold_6",
+    "models/cv_fold_7",
+    "models/cv_fold_8",
+    "models/cv_fold_9",
+    "models/cv_fold_10"
+  ],
+  "family_model_by_fold": {
+    "1": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "2": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "3": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "4": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "5": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "6": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "7": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "8": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "9": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    },
+    "10": {
+      "RF": "RandomForest",
+      "CAT": "CatBoost"
+    }
+  },
+  "label": "BRS_binary",
+  "positive_class": "BRS3"
+}
