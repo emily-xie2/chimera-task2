@@ -107,109 +107,94 @@ def interf0_handler():
     try:
         # Prefer resources root if it looks like an AutoGluon predictor dir
         base_resources_dir = Path("/opt/app/resources")
-        models_root = base_resources_dir / "models"
 
         def _is_predictor_dir(path: Path) -> bool:
             return (path / "predictor.pkl").exists() or (path / "learner.pkl").exists()
 
-        # First, try to use saved across-fold ensemble weights if available
-        ensemble_weights_path = models_root / "ensemble_CAT_RF_20.json"
-        used_ensemble = False
+        # First, try to load ensemble config for AvgBoost 4x10
+        ensemble_cfg = base_resources_dir / "models" / "ensemble_AvgBoost_4x10.json"
+        if ensemble_cfg.exists():
+            cfg = json.loads(ensemble_cfg.read_text())
+            families = cfg.get('families', [])
+            weights_per_family = cfg.get('weights_per_family', {})
+            fold_rel_paths = cfg.get('fold_rel_paths', [])
+            family_model_by_fold = cfg.get('family_model_by_fold', {})
+            label = cfg.get('label', None)
+            positive_class = cfg.get('positive_class', 'BRS3')
 
-        candidate_dirs = []
-        # 1) resources/
-        candidate_dirs.append(base_resources_dir)
-        # 2) resources/models/rf_final
-        candidate_dirs.append(base_resources_dir / "models" / "rf_final")
-        # 3) any subdir under resources/models that contains predictor artifacts
-        models_root = base_resources_dir / "models"
-        if models_root.exists():
-            for sub in models_root.iterdir():
-                if sub.is_dir():
-                    candidate_dirs.append(sub)
-
-        if ensemble_weights_path.exists():
+            # Ensure XGBoost dependency if needed
             try:
-                weights = json.loads(ensemble_weights_path.read_text())
-                if weights.get('ensemble_name') == 'Ensemble_CAT_RF_20':
-                    # Build clinical DF
-                    clinical_df = pd.DataFrame([input_chimera_clinical_data_of_bladder_cancer_patients])
-                    label_col = weights.get('label', 'BRS_binary')
-                    pos_class = weights.get('positive_class', 'BRS3')
-                    if label_col in clinical_df.columns:
-                        clinical_df = clinical_df.drop(columns=[label_col])
+                import xgboost  # type: ignore  # noqa: F401
+            except Exception as dep_err:
+                raise RuntimeError(
+                    "Required dependency 'xgboost' is not installed. "
+                    "Add 'xgboost' to requirements.txt, rebuild the image, and retry."
+                ) from dep_err
 
-                    fold_rel_paths = weights.get('fold_rel_paths', [])
-                    fam_models = weights.get('family_model_by_fold', {})
-                    fam_weights = weights.get('weights', {'CAT': 0.5, 'RF': 0.5})
+            # Convert clinical JSON to DataFrame
+            clinical_df = pd.DataFrame([input_chimera_clinical_data_of_bladder_cancer_patients])
+            if label and label in clinical_df.columns:
+                clinical_df = clinical_df.drop(columns=[label])
 
-                    fam_preds = { 'CAT': [], 'RF': [] }
+            # Collect per-family predictions across folds
+            preds_by_family = {fam: [] for fam in families}
+            for idx, rel_path in enumerate(fold_rel_paths, start=1):
+                fold_dir = base_resources_dir / rel_path
+                if not fold_dir.exists():
+                    continue
+                try:
+                    p = TabularPredictor.load(str(fold_dir), require_py_version_match=False)
+                except Exception:
+                    continue
 
-                    # Optional dependency checks (best-effort)
+                fold_key = str(idx)
+                fam_to_model = family_model_by_fold.get(fold_key, {})
+                for fam in families:
+                    mname = fam_to_model.get(fam)
+                    if not mname:
+                        continue
                     try:
-                        import xgboost  # noqa: F401
+                        proba_df = p.predict_proba(clinical_df, model=mname)
+                        if hasattr(proba_df, 'columns'):
+                            if positive_class in proba_df.columns:
+                                val = float(proba_df[positive_class].iloc[0])
+                            else:
+                                val = float(proba_df.max(axis=1).iloc[0])
+                        else:
+                            val = float(proba_df[0])
+                        preds_by_family[fam].append(val)
                     except Exception:
-                        pass
-                    try:
-                        import catboost  # noqa: F401
-                    except Exception:
-                        pass
-                    try:
-                        import lightgbm  # noqa: F401
-                    except Exception:
-                        pass
+                        continue
 
-                    for i, rel in enumerate(fold_rel_paths, start=1):
-                        fold_dir = base_resources_dir / rel
-                        try:
-                            p = TabularPredictor.load(str(fold_dir))
-                        except Exception as _e:
-                            print(f"Warn: failed to load fold predictor {fold_dir}: {_e}")
-                            continue
-                        chosen = fam_models.get(str(i), {})
-                        # Ensure we skip ensembles
-                        model_names = [m for m in p.model_names() if not m.startswith('WeightedEnsemble')]
-                        for fam in ['CAT', 'RF']:
-                            mname = chosen.get(fam)
-                            if not mname:
-                                # fallback: try to detect
-                                patterns = {'CAT': ['CatBoost','CAT'], 'RF': ['RandomForest','RF']}
-                                upnames = {m: m.upper() for m in model_names}
-                                for m in model_names:
-                                    for pat in patterns[fam]:
-                                        if pat.upper() in upnames[m]:
-                                            mname = m
-                                            break
-                                    if mname:
-                                        break
-                            if not mname:
-                                continue
-                            try:
-                                proba = p.predict_proba(clinical_df, model=mname)
-                                if hasattr(proba, 'columns'):
-                                    col = pos_class if pos_class in proba.columns else proba.columns[-1]
-                                    fam_preds[fam].append(float(proba[col].iloc[0]))
-                                else:
-                                    fam_preds[fam].append(float(proba[0]))
-                            except Exception as _e:
-                                print(f"Warn: prediction failed for fold {i}, family {fam}: {_e}")
+            # Compute weighted mean of family means
+            num = 0.0
+            den = 0.0
+            for fam, preds in preds_by_family.items():
+                if not preds:
+                    continue
+                fam_mean = float(sum(preds) / len(preds))
+                w = float(weights_per_family.get(fam, 0.0))
+                num += w * fam_mean
+                den += w
+            if den > 0:
+                output_brs_binary_classification = num / den
+            else:
+                raise RuntimeError("Ensemble config found but no valid family predictions were produced.")
+            print(f"Ensemble_AvgBoost_4x10 prediction (prob {positive_class}): {output_brs_binary_classification:.4f}")
+        else:
+            # Fallback to single-predictor inference
+            candidate_dirs = []
+            # 1) resources/
+            candidate_dirs.append(base_resources_dir)
+            # 2) resources/models/rf_final
+            candidate_dirs.append(base_resources_dir / "models" / "rf_final")
+            # 3) any subdir under resources/models that contains predictor artifacts
+            models_root = base_resources_dir / "models"
+            if models_root.exists():
+                for sub in models_root.iterdir():
+                    if sub.is_dir():
+                        candidate_dirs.append(sub)
 
-                    if fam_preds['CAT'] and fam_preds['RF']:
-                        cat_avg = float(sum(fam_preds['CAT']) / len(fam_preds['CAT']))
-                        rf_avg  = float(sum(fam_preds['RF'])  / len(fam_preds['RF']))
-                        output_brs_binary_classification = float(
-                            fam_weights.get('CAT', 0.5) * cat_avg + fam_weights.get('RF', 0.5) * rf_avg
-                        )
-                        print(
-                            f"Ensemble_CAT_RF_20 prediction: CAT_avg={cat_avg:.4f}, RF_avg={rf_avg:.4f}, "
-                            f"weights(CAT={fam_weights.get('CAT', 0.5):.3f}, RF={fam_weights.get('RF', 0.5):.3f}) => "
-                            f"prob BRS3={output_brs_binary_classification:.4f}"
-                        )
-                        used_ensemble = True
-            except Exception as ens_err:
-                print(f"Warning: failed to use Ensemble_CAT_RF_20 weights: {ens_err}")
-
-        if not used_ensemble:
             model_dir = None
             for cand in candidate_dirs:
                 try:
@@ -291,7 +276,7 @@ def interf0_handler():
                 # Series / ndarray case (assumed positive class probability)
                 output_brs_binary_classification = float(proba_df[0])
 
-            print(f"Model prediction (prob {target_class}): {output_brs_binary_classification:.4f}")
+        print(f"Model prediction (prob BRS3): {output_brs_binary_classification:.4f}")
     except Exception as e:
         # Fail fast and loudly; do not emit random predictions
         raise

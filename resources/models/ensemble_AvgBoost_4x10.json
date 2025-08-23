@@ -1,0 +1,92 @@
+{
+  "ensemble_name": "Ensemble_AvgBoost_4x10",
+  "families": [
+    "XGB",
+    "GBM",
+    "CAT",
+    "RF"
+  ],
+  "weights_per_family": {
+    "XGB": 0.25,
+    "GBM": 0.25,
+    "CAT": 0.25,
+    "RF": 0.25
+  },
+  "fold_rel_paths": [
+    "models/cv_fold_1",
+    "models/cv_fold_2",
+    "models/cv_fold_3",
+    "models/cv_fold_4",
+    "models/cv_fold_5",
+    "models/cv_fold_6",
+    "models/cv_fold_7",
+    "models/cv_fold_8",
+    "models/cv_fold_9",
+    "models/cv_fold_10"
+  ],
+  "family_model_by_fold": {
+    "1": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "2": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "3": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "4": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "5": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "6": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "7": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "8": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "9": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    },
+    "10": {
+      "GBM": "LightGBM",
+      "RF": "RandomForest",
+      "CAT": "CatBoost",
+      "XGB": "XGBoost"
+    }
+  },
+  "label": "BRS_binary",
+  "positive_class": "BRS3",
+  "aggregation": "weighted_mean_family_means"
+}
