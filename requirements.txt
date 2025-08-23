@@ -5,3 +5,4 @@ autogluon.tabular
 pandas
 autogluon.multimodal
 xgboost
+catboost
