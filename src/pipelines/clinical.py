@@ -99,7 +99,7 @@ def plot_categorical_distributions(
     categorical_cols: List[str],
     out_path: str,
     fold_title: str,
-    c_index: Optional[float] = None,
+    roc_auc: Optional[float] = None,
     n_cols: int = 2,
 ):
     """Bar charts of category counts for train vs. test."""
@@ -116,7 +116,7 @@ def plot_categorical_distributions(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
     fig.suptitle(
         f"Categorical Feature Distributions (Train vs. Test)\n{fold_title}"
-        + (f" (c-index: {c_index:.3f})" if c_index is not None else ""),
+        + (f" (ROC-AUC: {roc_auc:.3f})" if roc_auc is not None else ""),
         fontsize=16, fontweight="bold", y=1.02
     )
 
@@ -167,7 +167,7 @@ def plot_numeric_distributions(
     numeric_cols: List[str],
     out_path: str,
     fold_title: str,
-    c_index: Optional[float] = None,
+    roc_auc: Optional[float] = None,
     n_cols: int = 4,
 ):
     """Overlaid hist+density for train vs. test numerics; title shows JS divergence."""
@@ -184,7 +184,7 @@ def plot_numeric_distributions(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
     fig.suptitle(
         f"Numerical Feature Distributions (Train vs. Test)\n{fold_title}"
-        + (f" (c-index: {c_index:.3f})" if c_index is not None else ""),
+        + (f" (ROC-AUC: {roc_auc:.3f})" if roc_auc is not None else ""),
         fontsize=16, fontweight="bold", y=1.02
     )
 
@@ -237,7 +237,7 @@ def plot_cindex_by_model_and_fold(
     title: Optional[str] = None,
     n_cols: int = 2,
 ):
-    """Create grouped bar plots of train/test C-index per fold for each model.
+    """Create grouped bar plots of train/test ROC-AUC per fold for each model.
 
     Parameters
     ----------
@@ -309,10 +309,10 @@ def plot_cindex_by_model_and_fold(
             edgecolor="#5a2a00", linewidth=0.8
         )
 
-        # Title without "C-index"
+        # Title without "ROC-AUC"
         ax.set_title(f"{model}")
         ax.set_xlabel("Fold")
-        ax.set_ylabel("C-index")
+        ax.set_ylabel("ROC-AUC")
         ax.set_xticks(x)
         ax.set_xticklabels([str(v) for v in x_idx])
 
@@ -495,7 +495,7 @@ if clinical_df.shape[0] >= 10:
                 clinical_df, train_ids, test_ids, cat_cols,
                 out_path=os.path.join(plots_dir, f"fold_{fold_idx}_categorical.png"),
                 fold_title=fold_title,
-                c_index=None,
+                roc_auc=None,
             )
         except Exception as _e:
             print(f"Warning: categorical plot failed on fold {fold_idx}: {_e}")
@@ -504,32 +504,32 @@ if clinical_df.shape[0] >= 10:
                 clinical_df, train_ids, test_ids, num_cols,
                 out_path=os.path.join(plots_dir, f"fold_{fold_idx}_numeric.png"),
                 fold_title=fold_title,
-                c_index=None,
+                roc_auc=None,
             )
         except Exception as _e:
             print(f"Warning: numeric plot failed on fold {fold_idx}: {_e}")
 
-    # Save per-fold C-index metrics
+    # Save per-fold ROC-AUC metrics
     try:
         df_per_fold = pd.DataFrame(per_fold_rows)
         per_fold_csv = os.path.join(results_dir, 'per_fold_cindex.csv')
         df_per_fold.to_csv(per_fold_csv, index=False)
-        print(f"Saved per-fold C-index metrics to: {per_fold_csv}")
+        print(f"Saved per-fold ROC-AUC metrics to: {per_fold_csv}")
     except Exception as _e:
         print(f"Warning: failed to save per-fold metrics: {_e}")
 
-    # Plot C-index grouped bars across models and folds
+    # Plot ROC-AUC grouped bars across models and folds
     try:
         bar_out = os.path.join(results_dir, 'cindex_by_model_and_fold.png')
         plot_cindex_by_model_and_fold(
             cindex_by_model,
             out_path=bar_out,
-            title="10-fold CV: Train/Test C-index per Model",
+            title="10-fold CV: Train/Test ROC-AUC per Model",
             n_cols=2,
         )
-        print(f"Saved C-index bar plots to: {bar_out}")
+        print(f"Saved ROC-AUC bar plots to: {bar_out}")
     except Exception as _e:
-        print(f"Warning: failed to plot c-index by model and fold: {_e}")
+        print(f"Warning: failed to plot ROC-AUC by model and fold: {_e}")
 
     # Extended summary metrics (mean, std, min, quartiles, max, count) per model and split
     try:
